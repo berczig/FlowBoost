@@ -1,0 +1,12 @@
+[project]
+name = "FlowBoost"
+version = "1.0.0"
+description = "Machine learning applied to the Sphere packing problem in d dimensions"
+
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."] 
+include = ["flow_boost"] 

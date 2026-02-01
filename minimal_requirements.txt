@@ -1,0 +1,11 @@
+diffusers
+ffmpeg-python
+matplotlib>=3.8,<3.9
+nicegui
+numba
+numpy>=1.26,<2
+pandas
+scipy
+torch
+torchdiffeq
+tqdm
