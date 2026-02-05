@@ -1,7 +1,6 @@
 [project]
 name = "FlowBoost"
 version = "1.0.0"
-description = "Machine learning applied to the Sphere packing problem in d dimensions"
 
 [build-system]
 requires = ["setuptools >= 61.0"]
