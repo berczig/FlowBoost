@@ -21,9 +21,7 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.path import AffineProbPath
 from flow_matching.solver import ODESolver
 
-from flow_boost.spheres_in_cube_12d.pipeline import PipelineState
-
-from flow_boost.spheres_in_cube import data_load_save
+from flow_boost.spheres_in_hypercube.pipeline import PipelineState
 from flow_boost import cfg  # assumes flow_boost.cfg is a ConfigParser
 
 # ============================================================================
@@ -1471,9 +1469,29 @@ def rg_cfm_main(state: PipelineState = None):
 # ============================================================================
 # Main controlled by INI (flow_matching section)
 # ============================================================================
+def _normalize_flow_mode(mode_raw: str) -> str:
+    mode = str(mode_raw).strip().lower()
+    if mode in ("train_and_sample", "train_and_sampling", "training_and_sampling"):
+        return "training_and_sampling"
+    if mode in ("retrain_and_sampling", "retrain_and_sample", "retrain"):
+        return "retrain_and_sampling"
+    if mode in ("sampling_only", "sample_only"):
+        return "sampling_only"
+    if mode in ("train_only", "training_only"):
+        return "train_only"
+    if mode in ("retrain_only", "retraining_only"):
+        return "retrain_only"
+    if mode in ("rg_cfm", "rg-cfm"):
+        return "rg_cfm"
+    raise ValueError(
+        "Unknown flow_matching.mode. Expected one of: "
+        "training_and_sampling | retrain_and_sampling | sampling_only | train_only | retrain_only | rg_cfm"
+    )
+
+
 def main(state:PipelineState=None):
     sec = "flow_matching"
-    mode = cfg.get(sec, "mode", fallback="training_and_sampling").strip()
+    mode = _normalize_flow_mode(cfg.get(sec, "mode", fallback="training_and_sampling"))
     use_rg_after_train = cfg.getboolean("spheres_in_cube_new_pipeline", "use_rg_cfm", fallback=False)
 
     if mode == "rg_cfm":
@@ -1618,18 +1636,24 @@ def main(state:PipelineState=None):
     resume_path = cfg.get(sec, "resume_model_path", fallback="").strip()
     model_path = resume_path
 
+    def _sync_model_paths(path: str):
+        if not path:
+            return
+        cfg.set(sec, "resume_model_path", path)
+        cfg.set(sec, "rg_ref_path", path)
+        if state:
+            state.set_model_path(path)
+
     def _run_rg_cfm_after_train(model, opt, model_path):
         # Ensure RG-CFM starts from the checkpoint we just trained or resumed.
         ref_path = (state.model_path if (state and getattr(state, "model_path", "")) else model_path)
         if ref_path:
-            cfg.set(sec, "rg_ref_path", ref_path)
-            cfg.set(sec, "resume_model_path", ref_path)
+            _sync_model_paths(ref_path)
         print("[flow_matching] Starting RG-CFM immediately after supervised training.")
         ft_path = rg_cfm_main(state=state)
         # Make the fine-tuned checkpoint discoverable for any subsequent reload/sampling codepaths.
         if ft_path:
-            cfg.set(sec, "rg_ref_path", ft_path)
-            cfg.set(sec, "resume_model_path", ft_path)
+            _sync_model_paths(ft_path)
         # Reload the fine-tuned model into memory before sampling
         if state and state.model_path:
             model, opt = load_model_if_exists(model, opt, state.model_path, device)
@@ -1641,7 +1665,29 @@ def main(state:PipelineState=None):
             model, opt = load_model_if_exists(model, opt, cfg.get(sec, "resume_model_path", fallback="").strip(), device)
         return model, opt, model_path
 
-    if mode == "training_and_sampling":
+    def _sample_with_current_model():
+        return sample_flow_model(
+            model, opt, num_new, batch_n, points_N,
+            device, sphere_radius, 0.0, clip_range, d,
+            cond_loader=test_loader,
+            n_steps=gas_steps,
+            ode_method=ode_method,
+            ode_step_cap=ode_step_cap,
+            jitter=jitter,
+            eps_nrm=eps_nrm,
+            proj_outer_iters=proj_outer_iters,
+            alpha_proj=alpha_proj,
+            contact_q=contact_q,
+            wall_weight=wall_weight,
+            wall_margin=wall_margin,
+            prox_iters=prox_iters,
+            prox_step=prox_step,
+            prox_lambda=prox_lambda,
+            final_passes=final_passes,
+            tol_finish=tol_finish,
+        )
+
+    if mode in ("training_and_sampling", "train_only"):
         # When RG-CFM is enabled, allow training to start from the previous fine-tuned checkpoint.
         if use_rg_after_train and resume_path and os.path.isfile(resume_path):
             model, opt = load_model_if_exists(model, opt, resume_path, device)
@@ -1657,59 +1703,27 @@ def main(state:PipelineState=None):
             small_t_weight=small_t_weight,
             small_t_gamma=small_t_gamma,
         )
-        if state:
-            state.set_model_path(model_path)
+        _sync_model_paths(model_path)
 
         # Optional RG-CFM immediately after training
         if use_rg_after_train:
             model, opt, model_path = _run_rg_cfm_after_train(model, opt, model_path)
+            _sync_model_paths(model_path)
 
-        samples = sample_flow_model(
-            model, opt, num_new, batch_n, points_N,
-            device, sphere_radius, 0.0, clip_range, d,
-            cond_loader=test_loader,
-            n_steps=gas_steps,
-            ode_method=ode_method,
-            ode_step_cap=ode_step_cap,
-            jitter=jitter,
-            eps_nrm=eps_nrm,
-            proj_outer_iters=proj_outer_iters,
-            alpha_proj=alpha_proj,
-            contact_q=contact_q,
-            wall_weight=wall_weight,
-            wall_margin=wall_margin,
-            prox_iters=prox_iters,
-            prox_step=prox_step,
-            prox_lambda=prox_lambda,
-            final_passes=final_passes,
-            tol_finish=tol_finish,
-        )
+        if mode == "train_only":
+            print("[flow_matching] train_only mode: training (and optional RG-CFM) completed; skipping sampling.")
+            return None
+
+        samples = _sample_with_current_model()
 
     elif mode == "sampling_only":
         assert resume_path and os.path.isfile(resume_path), "resume_model_path must point to a saved model"
         model, opt = load_model_if_exists(model, opt, resume_path, device)
-        samples = sample_flow_model(
-            model, opt, num_new, batch_n, points_N,
-            device, sphere_radius, 0.0, clip_range, d,
-            cond_loader=test_loader,
-            n_steps=gas_steps,
-            ode_method=ode_method,
-            ode_step_cap=ode_step_cap,
-            jitter=jitter,
-            eps_nrm=eps_nrm,
-            proj_outer_iters=proj_outer_iters,
-            alpha_proj=alpha_proj,
-            contact_q=contact_q,
-            wall_weight=wall_weight,
-            wall_margin=wall_margin,
-            prox_iters=prox_iters,
-            prox_step=prox_step,
-            prox_lambda=prox_lambda,
-            final_passes=final_passes,
-            tol_finish=tol_finish,
-        )
+        model_path = resume_path
+        _sync_model_paths(model_path)
+        samples = _sample_with_current_model()
 
-    elif mode == "retrain_and_sampling":
+    elif mode in ("retrain_and_sampling", "retrain_only"):
         assert resume_path and os.path.isfile(resume_path), "resume_model_path must point to a saved model"
         model, opt = load_model_if_exists(model, opt, resume_path, device)
         model, hist, model_path = train_flow_model(
@@ -1723,34 +1737,18 @@ def main(state:PipelineState=None):
             small_t_weight=small_t_weight,
             small_t_gamma=small_t_gamma,
         )
-        if state:
-            state.set_model_path(model_path)
+        _sync_model_paths(model_path)
         if use_rg_after_train:
             model, opt, model_path = _run_rg_cfm_after_train(model, opt, model_path)
-        samples = sample_flow_model(
-            model, opt, num_new, batch_n, points_N,
-            device, sphere_radius, 0.0, clip_range, d,
-            cond_loader=test_loader,
-            n_steps=gas_steps,
-            ode_method=ode_method,
-            ode_step_cap=ode_step_cap,
-            jitter=jitter,
-            eps_nrm=eps_nrm,
-            proj_outer_iters=proj_outer_iters,
-            alpha_proj=alpha_proj,
-            contact_q=contact_q,
-            wall_weight=wall_weight,
-            wall_margin=wall_margin,
-            prox_iters=prox_iters,
-            prox_step=prox_step,
-            prox_lambda=prox_lambda,
-            final_passes=final_passes,
-            tol_finish=tol_finish,
-        )
+            _sync_model_paths(model_path)
+        if mode == "retrain_only":
+            print("[flow_matching] retrain_only mode: training (and optional RG-CFM) completed; skipping sampling.")
+            return None
+        samples = _sample_with_current_model()
 
     else:
         raise ValueError(f"Unknown mode: {mode}")
-    if state: state.set_model_path(model_path)
+    _sync_model_paths(model_path)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = os.path.join(save_generated_dir, f"spheres_gen_{num_new}x{points_N}_{ts}.pt")

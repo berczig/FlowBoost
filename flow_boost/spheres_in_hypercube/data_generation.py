@@ -11,15 +11,40 @@ import itertools
 from datetime import datetime
 from numba import njit
 from flow_boost import cfg
-from flow_boost.spheres_in_cube.physics_push_PESC import eliminate_overlaps_box
-from flow_boost.spheres_in_cube.best_results import load_best_results
-from flow_boost.spheres_in_cube_12d.pipeline import PipelineState
+from flow_boost.spheres_in_hypercube.pipeline import PipelineState
 from tqdm import tqdm
+
+try:
+    from flow_boost.spheres_in_cube.physics_push_PESC import eliminate_overlaps_box
+except Exception:
+    eliminate_overlaps_box = None
+
+try:
+    from flow_boost.spheres_in_cube.best_results import load_best_results
+except Exception:
+    load_best_results = None
 
 # -----------------------------------------------------------------------------
 # Config helper
 # -----------------------------------------------------------------------------
 EPS_SMALL = 1e-8
+
+
+def _require_physics_push():
+    if eliminate_overlaps_box is None:
+        raise ImportError(
+            "physics_push_mode=true requires flow_boost.spheres_in_cube.physics_push_PESC.eliminate_overlaps_box, "
+            "but that module is not available in this repository snapshot."
+        )
+
+
+def _require_best_results():
+    if load_best_results is None:
+        raise ImportError(
+            "sample_generation_PP+PBTS_multiple_sphere_num.active=true requires "
+            "flow_boost.spheres_in_cube.best_results.load_best_results, "
+            "but that module is not available in this repository snapshot."
+        )
 
 def _get_cfg(section, key, fallback):
     from flow_boost import cfg
@@ -349,6 +374,8 @@ def generate_dataset_push_srp(verbose=True):
     num_srp_restarts = _get_cfg(sec, "num_srp_restarts", 15)
 
     physics_push_mode = _get_cfg(sec, "physics_push_mode", True)
+    if physics_push_mode:
+        _require_physics_push()
 
     print(f"[HardWall SRP] N={N}, D={D}, L={L}, r={r}, M={M}, restarts={num_srp_restarts}")
     print("[HardWall SRP] Hard constraint: dist-to-wall >= 0.5 * current min pairwise distance.")
@@ -544,6 +571,7 @@ def generate_dataset_push_srp_different_sphere_count():
     base_output_filename_top     = _get_cfg(secmul, "output_filename_top",       "srp_mult_top_{SPHERE_NUM}_{DATE}.pt").replace("{DATE}", timestamp_str)
     base_output_filename_metrics = _get_cfg(secmul, "output_filename_metrics",   "srp_mult_metrics_{SPHERE_NUM}_{DATE}.csv").replace("{DATE}", timestamp_str)
 
+    _require_best_results()
     box_sizes = load_best_results()
     bar = tqdm(range(num_spheres_start, num_spheres_end + 1))
     for sphere_num in bar:
@@ -589,6 +617,8 @@ def final_push_existing_samples():
     num_srp_restarts = _get_cfg(sec, "num_srp_restarts", 15)
 
     physics_push_mode = _get_cfg(sec, "physics_push_mode", True)
+    if physics_push_mode:
+        _require_physics_push()
 
     stamp      = datetime.now().strftime("%Y-%m-%d")
     out_dir    = _get_cfg(sec, "final_push_output", "./outputs_spheres_push")
